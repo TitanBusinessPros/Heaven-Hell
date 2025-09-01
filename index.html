@@ -1,83 +1,316 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>3D Fire Portals</title>
+  <meta charset="utf-8" />
+  <title>Heaven/Hell — Fire Portals (Bloom + Particles)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { margin: 0; overflow: hidden; background: black; }
+    html, body { height: 100%; margin: 0; background: #000; overflow: hidden; }
     canvas { display: block; }
+    .hint {
+      position: fixed; left: 50%; transform: translateX(-50%);
+      bottom: 14px; font: 12px/1.2 system-ui, sans-serif; color: #98a; opacity: .7;
+      letter-spacing: .02em; user-select: none; pointer-events: none;
+    }
   </style>
 </head>
 <body>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/TextureLoader.js"></script>
-<script>
-  // Scene setup
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-  camera.position.z = 8;
+  <div class="hint">Fire portals: left = blue fire (good) • right = red fire (bad)</div>
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  document.body.appendChild(renderer.domElement);
+  <!-- We’ll use ES modules so the GitHub Pages build can load directly from CDN -->
+  <script type="module">
+    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+    import { EffectComposer } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js";
+    import { RenderPass } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/RenderPass.js";
+    import { UnrealBloomPass } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js";
 
-  // Add light so fire glows
-  const light = new THREE.PointLight(0xffffff, 2, 50);
-  light.position.set(0, 5, 10);
-  scene.add(light);
+    // ---------- Renderer / Scene / Camera ----------
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    document.body.appendChild(renderer.domElement);
 
-  // Load fire texture (animated noise)
-  const loader = new THREE.TextureLoader();
-  loader.load("https://threejs.org/examples/textures/lava/cloud.png", function(texture) {
-    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    const scene = new THREE.Scene();
 
-    function createPortal(color) {
-      const geometry = new THREE.TorusGeometry(2, 0.4, 32, 64);
-      const material = new THREE.MeshBasicMaterial({
-        map: texture,
-        color: color,
-        transparent: true,
-        opacity: 0.9
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      return { mesh, material };
+    const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 200);
+    camera.position.set(0, 0, 16);
+    scene.add(camera);
+
+    // Subtle background stars
+    {
+      const g = new THREE.BufferGeometry();
+      const N = 2000;
+      const pos = new Float32Array(N * 3);
+      for (let i = 0; i < N; i++) {
+        const r = 60 + Math.random() * 120;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        pos[i*3+0] = r * Math.sin(phi) * Math.cos(theta);
+        pos[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+        pos[i*3+2] = r * Math.cos(phi);
+      }
+      g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      const m = new THREE.PointsMaterial({ size: 0.4, sizeAttenuation: true, color: 0x556677 });
+      scene.add(new THREE.Points(g, m));
     }
 
-    const bluePortal = createPortal(0x00bfff);
-    bluePortal.mesh.position.x = -4;
-    scene.add(bluePortal.mesh);
+    // ---------- Postprocessing: Bloom ----------
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 1.2, 0.8, 0.2);
+    bloom.strength = 1.6;     // overall glow
+    bloom.radius = 0.8;       // spread
+    bloom.threshold = 0.0;    // everything can glow
+    composer.addPass(bloom);
 
-    const redPortal = createPortal(0xff4500);
-    redPortal.mesh.position.x = 4;
-    scene.add(redPortal.mesh);
+    // ---------- Fire Portal Shader (torus) ----------
+    // Simplex noise GLSL (Ashima) – compacted
+    const simplex = `
+    vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
+    vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
+    vec4 permute(vec4 x){return mod289(((x*34.0)+1.0)*x);}
+    vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
+    float snoise(vec3 v){
+      const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
+      const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+      vec3 i  = floor(v + dot(v, C.yyy) );
+      vec3 x0 =   v - i + dot(i, C.xxx) ;
+      vec3 g = step(x0.yzx, x0.xyz);
+      vec3 l = 1.0 - g;
+      vec3 i1 = min( g.xyz, l.zxy );
+      vec3 i2 = max( g.xyz, l.zxy );
+      vec3 x1 = x0 - i1 + C.xxx;
+      vec3 x2 = x0 - i2 + C.yyy;
+      vec3 x3 = x0 - D.yyy;
+      i = mod289(i);
+      vec4 p = permute( permute( permute(
+                i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+              + i.y + vec4(0.0, i1.y, i2.y, 1.0 ))
+              + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+      vec4 j = p - 49.0 * floor(p * (1.0/49.0));
+      vec4 x_ = floor(j * (1.0/7.0));
+      vec4 y_ = floor(j - 7.0 * x_ );
+      vec4 x = (x_ * (1.0/7.0)) + 0.5/7.0;
+      vec4 y = (y_ * (1.0/7.0)) + 0.5/7.0;
+      vec4 h = 1.0 - abs(x) - abs(y);
+      vec4 b0 = vec4( x.xy, y.xy );
+      vec4 b1 = vec4( x.zw, y.zw );
+      vec4 s0 = floor(b0)*2.0 + 1.0;
+      vec4 s1 = floor(b1)*2.0 + 1.0;
+      vec4 sh = -step(h, vec4(0.0));
+      vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+      vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+      vec3 p0 = vec3(a0.xy,h.x);
+      vec3 p1 = vec3(a0.zw,h.y);
+      vec3 p2 = vec3(a1.xy,h.z);
+      vec3 p3 = vec3(a1.zw,h.w);
+      vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+      p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+      vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+      m = m*m;
+      return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1),
+                                    dot(p2,x2), dot(p3,x3) ) );
+    }`;
 
-    // Animate
+    const portalVertex = /* glsl */`
+      uniform float uTime;
+      uniform float uDistortAmp;
+      varying vec3 vPos;
+      varying vec3 vNormal;
+      varying float vNoise;
+      ${simplex}
+      void main(){
+        vPos = position;
+        vNormal = normalize(normalMatrix * normal);
+        // compute 3D noise in object space that scrolls over time to mimic flames
+        float n = snoise( vec3(position * 1.5 + vec3(0.0, uTime*0.9, 0.0)) );
+        vNoise = n;
+        // displace vertices slightly along normals for heat/licking motion
+        vec3 displaced = position + normal * n * uDistortAmp;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
+      }
+    `;
+
+    const portalFragment = /* glsl */`
+      precision highp float;
+      uniform vec3  uBaseColor;
+      uniform vec3  uHotColor;
+      uniform float uTime;
+      varying vec3  vPos;
+      varying vec3  vNormal;
+      varying float vNoise;
+      ${simplex}
+      void main(){
+        // radial mask (stronger near outside of torus, softer inside) for emissive falloff
+        float rim = pow( clamp( dot(normalize(vNormal), vec3(0.0,0.0,1.0)) * 0.5 + 0.5, 0.0, 1.0 ), 2.0 );
+        // extra animated flicker
+        float flicker = snoise(vec3(vPos * 2.4 + vec3(0.0, uTime*2.2, 0.0)));
+        float fire = smoothstep(0.0, 1.0, 0.55 + 0.45 * vNoise + 0.25 * flicker);
+
+        // color ramp from base to hot
+        vec3 col = mix(uBaseColor, uHotColor, fire);
+        // make center darker to feel like a hole
+        float hole = smoothstep(0.0, 1.0, 1.0 - abs(vPos.y) * 0.6);
+        col *= (0.65 + 0.35 * rim) * (0.8 + 0.2 * fire) * hole;
+
+        gl_FragColor = vec4(col, 0.85);
+      }
+    `;
+
+    function makePortal({
+      position = new THREE.Vector3(),
+      baseColor = 0x00bfff,  // cyan/blue default
+      hotColor  = 0xffffff,  // white-hot tips
+      radius = 3,
+      tube = 0.55,
+      rotateX = Math.PI / 2
+    } = {}) {
+      const geo = new THREE.TorusGeometry(radius, tube, 96, 256);
+      const mat = new THREE.ShaderMaterial({
+        uniforms: {
+          uTime:       { value: 0 },
+          uDistortAmp: { value: 0.28 },
+          uBaseColor:  { value: new THREE.Color(baseColor) },
+          uHotColor:   { value: new THREE.Color(hotColor) },
+        },
+        vertexShader: portalVertex,
+        fragmentShader: portalFragment,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        depthWrite: false
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.copy(position);
+      mesh.rotation.x = rotateX;
+      scene.add(mesh);
+
+      // Ember particle ring around the portal
+      const emberCount = 1200;
+      const pGeo = new THREE.BufferGeometry();
+      const pos = new Float32Array(emberCount * 3);
+      const vel = new Float32Array(emberCount * 3); // store angular velocity + radial jitter in x/y/z
+      for (let i = 0; i < emberCount; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const r = radius + (Math.random() * 0.6 - 0.3); // slight radial spread
+        const x = Math.cos(angle) * r;
+        const y = (Math.random() - 0.5) * tube * 0.9;
+        const z = Math.sin(angle) * r;
+        pos[i*3+0] = x; pos[i*3+1] = y; pos[i*3+2] = z;
+
+        // store angular speed in .x, vertical drift in .y, radial drift sign in .z
+        vel[i*3+0] = (Math.random() * 0.6 + 0.2) * (Math.random() < 0.5 ? -1 : 1);
+        vel[i*3+1] = (Math.random() * 0.2 + 0.05) * (Math.random() < 0.5 ? -1 : 1);
+        vel[i*3+2] = Math.random() * 0.002 - 0.001;
+      }
+      pGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      pGeo.setAttribute("velocity", new THREE.BufferAttribute(vel, 3));
+      const pMat = new THREE.PointsMaterial({
+        size: 0.06, sizeAttenuation: true,
+        color: new THREE.Color(baseColor).multiplyScalar(1.3),
+        transparent: true, opacity: 0.95,
+        blending: THREE.AdditiveBlending, depthWrite: false
+      });
+      const points = new THREE.Points(pGeo, pMat);
+      points.rotation.x = rotateX;
+      points.position.copy(position);
+      scene.add(points);
+
+      return { mesh, mat, points, pGeo };
+    }
+
+    // ---------- Create two portals: Good (blue fire) & Bad (red fire) ----------
+    const goodPortal = makePortal({
+      position: new THREE.Vector3(-6.0, 0, 0),
+      baseColor: 0x00bfff,           // blue fire
+      hotColor:  0xaee6ff,           // icy white-blue tips
+      radius: 3.2,
+      tube: 0.55
+    });
+
+    const badPortal = makePortal({
+      position: new THREE.Vector3(6.0, 0, 0),
+      baseColor: 0xff3b00,           // red/orange fire
+      hotColor:  0xfff0a0,           // yellow-white tips
+      radius: 3.2,
+      tube: 0.55
+    });
+
+    // ---------- Subtle ambient foggy glow plane behind each portal ----------
+    function addBackGlow(x, color) {
+      const geo = new THREE.PlaneGeometry(10, 10);
+      const mat = new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.08, blending: THREE.AdditiveBlending, depthWrite: false
+      });
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, 0, -2);
+      scene.add(m);
+    }
+    addBackGlow(-6, 0x33ccff);
+    addBackGlow( 6, 0xff4400);
+
+    // ---------- Animate ----------
     const clock = new THREE.Clock();
+
+    function animateEmbers(portal, dt) {
+      const pos = portal.pGeo.getAttribute("position");
+      const vel = portal.pGeo.getAttribute("velocity");
+      const N = pos.count;
+
+      // rotate all embers around the portal center in its local plane
+      for (let i = 0; i < N; i++) {
+        let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+        const angSpeed = vel.getX(i) * dt;   // angular velocity sign/speed
+        const yDrift   = vel.getY(i) * dt;   // vertical wobble
+        const rDrift   = vel.getZ(i);        // slow radial shrink/grow
+
+        // Convert to angle/radius in portal plane (x,z because portal plane faces camera)
+        const r = Math.hypot(x, z) + rDrift;
+        const a = Math.atan2(z, x) + angSpeed;
+
+        // Update position in plane plus vertical jitter
+        x = Math.cos(a) * r;
+        z = Math.sin(a) * r;
+        y += yDrift;
+
+        // Wrap vertical range a bit so they hover around the ring
+        const yMax = 0.5;
+        if (y >  yMax) y = -yMax;
+        if (y < -yMax) y =  yMax;
+
+        pos.setXYZ(i, x, y, z);
+      }
+      pos.needsUpdate = true;
+    }
+
     function animate() {
       requestAnimationFrame(animate);
       const t = clock.getElapsedTime();
+      const dt = clock.getDelta();
 
-      // Scroll the fire texture
-      texture.offset.y = t * 0.2;
+      // drive shader time
+      goodPortal.mat.uniforms.uTime.value = t;
+      badPortal.mat.uniforms.uTime.value  = t;
 
-      // Spin the portals
-      bluePortal.mesh.rotation.x = t * 0.5;
-      bluePortal.mesh.rotation.y = t * 0.5;
+      // slow spin for style
+      goodPortal.mesh.rotation.z += 0.08 * dt;
+      badPortal.mesh.rotation.z  -= 0.08 * dt;
 
-      redPortal.mesh.rotation.x = -t * 0.5;
-      redPortal.mesh.rotation.y = -t * 0.5;
+      animateEmbers(goodPortal, dt);
+      animateEmbers(badPortal, dt);
 
-      renderer.render(scene, camera);
+      composer.render();
     }
     animate();
-  });
 
-  // Resize handler
-  window.addEventListener("resize", () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
-</script>
+    // ---------- Resize ----------
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+      composer.setSize(innerWidth, innerHeight);
+      bloom.setSize(innerWidth, innerHeight);
+    });
+  </script>
 </body>
 </html>
