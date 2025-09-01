@@ -2,62 +2,114 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>3D Portals</title>
+  <title>Magical Fire Portals</title>
   <style>
     body { margin: 0; overflow: hidden; }
     canvas { display: block; }
   </style>
 </head>
 <body>
-  <!-- Three.js -->
   <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
   <script>
-    // === Scene setup ===
+    // === Scene Setup ===
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x000000); // black void
+    scene.background = new THREE.Color(0x000000);
 
     const camera = new THREE.PerspectiveCamera(
       75, window.innerWidth / window.innerHeight, 0.1, 1000
     );
-    camera.position.z = 5;
+    camera.position.z = 6;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     document.body.appendChild(renderer.domElement);
 
-    // === Portals ===
-    function createPortal(color) {
-      const geometry = new THREE.RingGeometry(1, 1.5, 64);
-      const material = new THREE.MeshBasicMaterial({
-        color: color,
-        side: THREE.DoubleSide,
+    // === Fire Shader Material ===
+    const fireVertexShader = `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+
+    const fireFragmentShader = `
+      varying vec2 vUv;
+      uniform float time;
+      uniform vec3 fireColor;
+
+      // Simple noise function
+      float random(vec2 st) {
+        return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
+      }
+      float noise(vec2 st) {
+        vec2 i = floor(st);
+        vec2 f = fract(st);
+        float a = random(i);
+        float b = random(i + vec2(1.0, 0.0));
+        float c = random(i + vec2(0.0, 1.0));
+        float d = random(i + vec2(1.0, 1.0));
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(a, b, u.x) +
+               (c - a) * u.y * (1.0 - u.x) +
+               (d - b) * u.x * u.y;
+      }
+
+      void main() {
+        // distort UV with time for animated fire effect
+        vec2 uv = vUv * 3.0;
+        float n = noise(uv + time * 0.5);
+        float intensity = smoothstep(0.4, 1.0, n);
+
+        vec3 color = mix(vec3(0.0), fireColor, intensity);
+
+        // Fade edges of the ring
+        float dist = length(vUv - 0.5);
+        float edge = smoothstep(0.4, 0.5, dist) * (1.0 - smoothstep(0.5, 0.55, dist));
+
+        gl_FragColor = vec4(color * edge, edge);
+      }
+    `;
+
+    function createFirePortal(color) {
+      const geometry = new THREE.PlaneGeometry(3, 3, 1, 1);
+      const material = new THREE.ShaderMaterial({
+        vertexShader: fireVertexShader,
+        fragmentShader: fireFragmentShader,
+        uniforms: {
+          time: { value: 0 },
+          fireColor: { value: new THREE.Color(color) }
+        },
         transparent: true,
-        opacity: 0.8
+        side: THREE.DoubleSide
       });
-      const portal = new THREE.Mesh(geometry, material);
-      return portal;
+      return { mesh: new THREE.Mesh(geometry, material), material };
     }
 
-    const goodPortal = createPortal(0x87ceeb); // light blue
-    goodPortal.position.x = -2.5;
+    // === Create Good (Blue Fire) Portal ===
+    const good = createFirePortal(0x00bfff); // blue
+    good.mesh.position.x = -3;
+    scene.add(good.mesh);
 
-    const badPortal = createPortal(0xff0000); // red
-    badPortal.position.x = 2.5;
+    // === Create Bad (Red Fire) Portal ===
+    const bad = createFirePortal(0xff4500); // red/orange
+    bad.mesh.position.x = 3;
+    scene.add(bad.mesh);
 
-    scene.add(goodPortal, badPortal);
-
-    // === Animation ===
+    // === Animation Loop ===
+    let clock = new THREE.Clock();
     function animate() {
       requestAnimationFrame(animate);
+      let t = clock.getElapsedTime();
 
-      goodPortal.rotation.z += 0.01;
-      badPortal.rotation.z -= 0.01;
+      good.material.uniforms.time.value = t;
+      bad.material.uniforms.time.value = t;
 
       renderer.render(scene, camera);
     }
     animate();
 
-    // === Resize handler ===
+    // === Resize Handling ===
     window.addEventListener("resize", () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
@@ -66,3 +118,4 @@
   </script>
 </body>
 </html>
+
